@@ -15,6 +15,8 @@ class DatasetOutput(NamedTuple):
     placeholder_values: Optional[Dict]
     measurement_path: Optional[str]
     dataset: Optional[str]
+    camera_intrinsics: Optional[Tensor] = None
+    camera_extrinsics: Optional[Tensor] = None
     qa_templates: Optional[Tuple[str, str]] = None
     eval_infos: Optional[Dict] = None
 

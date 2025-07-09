@@ -54,7 +54,11 @@ def main(cfg: TrainConfig):
             state_dict = get_fp32_state_dict_from_zero_checkpoint(cfg.checkpoint)
         else:
             state_dict = torch.load(cfg.checkpoint, map_location="cpu")
-        model.load_state_dict(state_dict)
+        # Lightning checkpoints may contain a 'state_dict' field
+        if isinstance(state_dict, dict) and "state_dict" in state_dict:
+            state_dict = state_dict["state_dict"]
+        # Load weights even if some keys are missing
+        model.load_state_dict(state_dict, strict=False)
 
         
     # print config

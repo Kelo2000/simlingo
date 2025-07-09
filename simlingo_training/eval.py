@@ -93,7 +93,9 @@ def main(cfg: TrainConfig):
             state_dict = get_fp32_state_dict_from_zero_checkpoint(cfg.checkpoint)
         else:
             state_dict = torch.load(cfg.checkpoint, map_location="cpu")
-        model.load_state_dict(state_dict)
+        if isinstance(state_dict, dict) and "state_dict" in state_dict:
+            state_dict = state_dict["state_dict"]
+        model.load_state_dict(state_dict, strict=False)
 
         
     # print config
