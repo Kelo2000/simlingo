@@ -70,124 +70,45 @@ class DataModule(LightningDataModule):
 
     def setup(self, stage=None):
         if not self.predict:
-            self.val_datasets = []
-            sum_sample_weights = 1.0
-            bucket_list = []
-            num_datasets = 0
-            datasets = {}
-            sample_weights = []
-            
-            if self.driving_dataset is not None or self.dreamer_dataset is not None:
-                # Create lists of datasets and their corresponding training partitions
-                used_driving_datasets = []
-                used_train_partitions = []
-                
-                # Pair datasets with their training partitions and filter out None datasets
-                dataset_pairs = zip(
-                    [self.driving_dataset, self.dreamer_dataset],
-                    [self.train_partitions, self.train_partitions_dreamer]
-                )
-                
-                for dataset, partition in dataset_pairs:
-                    if dataset is not None:
-                        used_driving_datasets.append(dataset)
-                        used_train_partitions.append(partition)
-                
-                weights_driving = 0.5
-                weights_dreamer = 1 - weights_driving
-                for udd_i, (used_driving_dataset, used_train_partitions) in enumerate(zip(used_driving_datasets, used_train_partitions)):
-                    num_datasets += 1
-                    if used_train_partitions is not None:
-                        bucket_list_tmp = list(used_train_partitions.keys())
-                        sample_weights_tmp = list(used_train_partitions.values())
-                        sum_sample_weights = sum(sample_weights_tmp)
-                            
-                        sample_weights_tmp = [w/sum_sample_weights for w in sample_weights_tmp]
-                        if self.driving_dataset is not None and self.dreamer_dataset is not None:
+            if getattr(self, "covla_dataset", None) is None:
+                raise ValueError("CoVLA dataset configuration missing")
 
-                            if udd_i == 0:
-                                sample_weights_tmp = [w * weights_driving for w in sample_weights_tmp]
-                            else:
-                                sample_weights_tmp = [w * weights_dreamer for w in sample_weights_tmp]
+            self.train_dataset = hydra.utils.instantiate(
+                self.covla_dataset,
+                split="train",
+                **self.cfg,
+                **self.base_dataset,
+                _recursive_=False,
+            )
+            self.val_dataset = hydra.utils.instantiate(
+                self.covla_dataset,
+                split="val",
+                **self.cfg,
+                **self.base_dataset,
+                _recursive_=False,
+            )
 
-                        if udd_i == 1:
-                            bucket_list_tmp = [f"{b}_dreamer" for b in bucket_list_tmp]
-                        bucket_list.extend(bucket_list_tmp)
-                        sample_weights.extend(sample_weights_tmp)
-                    else:
-                        if udd_i == 1:
-                            bucket_list_tmp = ['all_dreamer']
-                            sample_weights_tmp = [weights_dreamer]
-                        else:
-                            bucket_list_tmp = ['all']
-                            sample_weights_tmp = [weights_driving]
-                        bucket_list.extend(bucket_list_tmp)
-                        sample_weights.extend(sample_weights_tmp)
-                    
-
-                    for bucket in bucket_list_tmp:
-                        bucket_name = bucket.replace('_dreamer','')
-                        datasets[bucket] = hydra.utils.instantiate(
-                            used_driving_dataset,
-                            split="train",
-                            bucket_name=bucket_name,
-                            **self.cfg,
-                            **self.base_dataset,
-                            _recursive_=False
-                        )
-                    self.val_datasets.append(hydra.utils.instantiate(
-                            used_driving_dataset,
-                            split="val",
-                            bucket_name="all",
-                            **self.cfg,
-                            **self.base_dataset,
-                            _recursive_=False
-                        ))
-                    
-                    sum_sample_weights = sum(sample_weights_tmp)
-            
-
-            
-            self.train_dataset = None
-            if len(datasets) > 0:
-                
-                # remove datasets with 0 samples
-                sample_weights = [sample_weights[i] for i, bucket in enumerate(bucket_list) if datasets[bucket].__len__() > 0]
-                bucket_list = [bucket for bucket in bucket_list if datasets[bucket].__len__() > 0]
-                if len(bucket_list) != len(datasets):
-                    # print in red
-                    print(f"\033[91mDatasets with 0 samples: {set(datasets.keys()) - set(bucket_list)}\033[00m")
-                    print(f"\033[91mContinue without this bucket.\033[00m")
-                datasets = {key: value for key, value in datasets.items() if value.__len__() > 0}
-
-                self.train_dataset = torch.utils.data.ConcatDataset([datasets[bucket] for bucket in bucket_list])
-                weights_train = [[sample_weights[i]] * datasets[bucket].__len__() for i, bucket in enumerate(bucket_list)]
-                weights_train = list(itertools.chain.from_iterable(weights_train))
-                num_samples_all = [datasets[bucket].__len__() // sample_weights[i] for i, bucket in enumerate(bucket_list)]
-                num_samples = int(min(num_samples_all))# * num_datasets
-                print(f"Num samples: {num_samples}")
-                if self.driving_dataset is not None:
-                    print(f"Num samples all: {datasets['all'].__len__()}")
-                self.sampler_train = torch.utils.data.WeightedRandomSampler(weights=weights_train, num_samples=num_samples, replacement=True)
-
-            self.val_dataset = torch.utils.data.ConcatDataset(self.val_datasets)
+            self.sampler_train = None
             self.predict_dataset = None
-
+            self.val_datasets = [self.val_dataset]
         else:
             if self.qa_dataset is not None:
                 predict_dataset = self.qa_dataset
-                
             elif self.insteval_dataset is not None:
                 predict_dataset = self.insteval_dataset
+            else:
+                predict_dataset = self.covla_dataset
 
             self.predict_dataset = hydra.utils.instantiate(
-                    predict_dataset,
-                    split="val",
-                    bucket_name="all",
-                    **self.cfg,
-                    **self.base_dataset,
-                    _recursive_=False
-                )
+                predict_dataset,
+                split="val",
+                **self.cfg,
+                **self.base_dataset,
+                _recursive_=False,
+            )
+
+        if not self.predict:
+            self.val_dataset = self.val_datasets[0]
 
 
     def train_dataloader(self):
@@ -196,7 +117,7 @@ class DataModule(LightningDataModule):
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
-            # shuffle=True, # we use custom sampler instead
+            shuffle=self.sampler_train is None,
             num_workers=self.num_workers,
             drop_last=True,
             collate_fn=self.dl_collate_fn,
@@ -316,24 +237,57 @@ class DataModule(LightningDataModule):
             qa_templates = None
             eval_infos = None
         
-        driving_input=DrivingInput(
-                camera_images=image_ff_pixel,  # [B, T, N, C, H, W] uint8 [0, 255]
-                image_sizes=image_ff_sizes,
-                camera_intrinsics = torch.repeat_interleave(get_camera_intrinsics(W, H, 110).unsqueeze(0), BS, dim=0).view(BS, 3, 3).float(),
-                camera_extrinsics = torch.repeat_interleave(get_camera_extrinsics().unsqueeze(0), BS, dim=0).view(BS, 4, 4).float(),
-                vehicle_speed=torch.tensor(np.asarray([data[i].speed for i in range(len(data))])).float(),  # [B, S] float32
-                target_point=torch.tensor(np.asarray([data[i].target_points for i in range(len(data))])).float(),  # [B, 2] float32
-                prompt=prompt_languagelabel,
-                prompt_inference=prompt_question_languagelabel,
-            )
+        target_points = []
+        for d in data:
+            if d.target_points is None:
+                target_points.append(np.zeros(2))
+            else:
+                target_points.append(d.target_points)
 
-        driving_label=DrivingLabel(
-                waypoints=waypoints,
-                path=torch.tensor(np.asarray([data[i].path for i in range(len(data))])).float(), # [B, 3, RH, RW] uint8 [0, 255]
-                answer=answer_label,
-                image_ff_org=image_ff_org,
-                eval_infos=eval_infos,
-            )
+        paths = []
+        for d in data:
+            if d.path is None:
+                paths.append(np.zeros((self.base_dataset.num_route_points, 2)))
+            else:
+                paths.append(d.path)
+
+        cam_ints = []
+        cam_exts = []
+        default_K = get_camera_intrinsics(W, H, 110).numpy()
+        default_E = get_camera_extrinsics().numpy()
+        for d in data:
+            if getattr(d, "camera_intrinsics", None) is not None:
+                cam_ints.append(d.camera_intrinsics)
+            else:
+                cam_ints.append(default_K)
+            if getattr(d, "camera_extrinsics", None) is not None:
+                cam_exts.append(d.camera_extrinsics)
+            else:
+                cam_exts.append(default_E)
+
+        cam_ints = torch.tensor(np.asarray(cam_ints)).float()
+        cam_exts = torch.tensor(np.asarray(cam_exts)).float()
+
+        driving_input = DrivingInput(
+            camera_images=image_ff_pixel,  # [B, T, N, C, H, W] uint8 [0, 255]
+            image_sizes=image_ff_sizes,
+            camera_intrinsics=cam_ints,
+            camera_extrinsics=cam_exts,
+            vehicle_speed=torch.tensor(
+                np.asarray([d.speed for d in data])
+            ).float(),  # [B, S] float32
+            target_point=torch.tensor(np.asarray(target_points)).float(),
+            prompt=prompt_languagelabel,
+            prompt_inference=prompt_question_languagelabel,
+        )
+
+        driving_label = DrivingLabel(
+            waypoints=waypoints,
+            path=torch.tensor(np.asarray(paths)).float(),
+            answer=answer_label,
+            image_ff_org=image_ff_org,
+            eval_infos=eval_infos,
+        )
             
         return DrivingExample(
             driving_input=driving_input,

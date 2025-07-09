@@ -309,8 +309,8 @@ class DrivingModel(pl.LightningModule):
                 "language_gt": language_gt,
                 "prompt": batch.driving_input.prompt.language_string,
                 "path": run_ids,
-                "qa_templates": batch.qa_templates,
-                "eval_infos": batch.driving_label.eval_infos,
+                "qa_templates": batch.qa_templates if batch.qa_templates is not None else [],
+                "eval_infos": batch.driving_label.eval_infos if batch.driving_label.eval_infos is not None else [],
             }
         else:
             self.prediction["waypoints"].append(speed_wps)
@@ -321,8 +321,10 @@ class DrivingModel(pl.LightningModule):
             self.prediction["language_gt"].extend(language_gt)
             self.prediction["prompt"].extend(batch.driving_input.prompt.language_string)
             self.prediction["path"].extend(run_ids)
-            self.prediction["qa_templates"].extend(batch.qa_templates)
-            self.prediction["eval_infos"].extend(batch.driving_label.eval_infos)
+            if batch.qa_templates is not None:
+                self.prediction["qa_templates"].extend(batch.qa_templates)
+            if batch.driving_label.eval_infos is not None:
+                self.prediction["eval_infos"].extend(batch.driving_label.eval_infos)
             
         
         return speed_wps, route, language, speed_wps_gt, route_gt, language_gt
@@ -357,10 +359,12 @@ class DrivingModel(pl.LightningModule):
         samples_all = [i for i in range(len(self.prediction["prompt"]))]
         language = [(l, l_gt, p) for l, l_gt, p in zip(self.prediction["language"], self.prediction["language_gt"], self.prediction["path"])]
         
-        if len(samples_qa) > 0:
+        if len(samples_qa) > 0 and self.prediction.get("qa_templates"):
             # sort by templates
             sorted_samples = {} # question: {answer: [language, language_gt]}
             for qa_template, language_sample in zip(self.prediction["qa_templates"], language):
+                if qa_template is None:
+                    continue
                 question = qa_template[0]
                 answer = qa_template[1]
                 if question not in sorted_samples:
@@ -392,11 +396,14 @@ class DrivingModel(pl.LightningModule):
         route_preds = torch.cat(route_preds, dim=0)
         route_gt = self.prediction["route_gt"]
         route_gt = torch.cat(route_gt, dim=0)
-        
+
         waypoints_preds = self.prediction["waypoints"]
         waypoints_preds = torch.cat(waypoints_preds, dim=0)
         waypoints_gt = self.prediction["waypoints_gt"]
         waypoints_gt = torch.cat(waypoints_gt, dim=0)
+
+        if not self.prediction.get("eval_infos"):
+            return
         
         # calc distance between wps for 1d wps
         waypoints_preds_1d = []

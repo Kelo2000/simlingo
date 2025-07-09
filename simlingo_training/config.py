@@ -82,6 +82,10 @@ class DrivingDatasetConfig:
 class DreamerDatasetConfig:
     # base: DatasetBaseConfig = field(default_factory=DatasetBaseConfig)
     _target_: str = "simlingo_training.dataloader.dataset_dreamer.Data_Dreamer"
+
+@dataclass
+class CoVLADatasetConfig:
+    _target_: str = "simlingo_training.dataloader.dataset_covla.Data_CoVLA"
     
 @dataclass
 class QADatasetConfig:
@@ -100,6 +104,7 @@ class DrivingDataModuleConfig:
     
     driving_dataset:Optional[ DrivingDatasetConfig] = field(default_factory=DrivingDatasetConfig)
     dreamer_dataset: Optional[DreamerDatasetConfig] = field(default_factory=DreamerDatasetConfig)
+    covla_dataset: Optional[CoVLADatasetConfig] = None
     qa_dataset: Optional[QADatasetConfig] = field(default_factory=QADatasetConfig)
     insteval_dataset: Optional[InstEvalDatasetConfig] = field(default_factory=InstEvalDatasetConfig)
 
@@ -146,6 +151,7 @@ class TrainConfig:
     val_every_n_epochs: int = 1
 
     checkpoint: Optional[str] = None
+    visualize: bool = False
 
 
 def register_configs():

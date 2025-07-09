@@ -192,7 +192,7 @@ class DrivingAdaptor(nn.Module):
             label_route = None
 
         if self.speed_wps_mode == '2d':
-            label_speed_wps = label.waypoints[:, : self.future_waypoints + 1]
+            label_speed_wps = label.waypoints[:, : self.future_speed_waypoints]
         elif self.speed_wps_mode == '1d':
             label_speed_wps = label.waypoints_1d
         else:
