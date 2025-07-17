@@ -78,9 +78,8 @@ class DrivingModel(pl.LightningModule):
         
         driving = None
         driving = DrivingAdaptor(
-            self.language_model.hidden_size, 
+            self.language_model.hidden_size,
             speed_wps_mode=self.speed_wps_mode,
-            predict_route_as_wps=self.predict_route_as_wps,
         )
 
         self.adaptors = AdaptorList(
@@ -109,7 +108,7 @@ class DrivingModel(pl.LightningModule):
         """
         Samples a trajectory from the model.
         """
-        self.speed_wps, self.route, self.language = None, None, []
+        self.speed_wps, self.language = None, []
         try:
             driving_input = example.driving_input
         except AttributeError:
@@ -184,7 +183,7 @@ class DrivingModel(pl.LightningModule):
                 if v is not None:
                     setattr(self, k, v)
 
-        return self.speed_wps, self.route, self.language
+        return self.speed_wps, self.language
 
 
     def forward_model(self, 
@@ -285,61 +284,35 @@ class DrivingModel(pl.LightningModule):
     def predict_step(self, batch: DrivingExample, _batch_idx: int = 0):
         run_ids = decode_uint8(batch.run_id)
         
-        speed_wps, route, language = self.forward(batch, return_language=True)
-
-        self.num_route_points = 20
-        route_equal = []
-        for i in range(len(route)):
-            route_equal.append(self.equal_spacing_route(route[i].cpu()))
-        route_equal = torch.tensor(route_equal)
-        route = route_equal.to(route.device)
-        
-        
-        route_gt = batch.driving_label.path
+        speed_wps, language = self.forward(batch, return_language=True)
         speed_wps_gt = batch.driving_label.waypoints
         language_gt = batch.driving_label.answer.language_string
         
         if len(self.prediction) == 0:
             self.prediction = {
                 "waypoints": [speed_wps],
-                "route": [route],
                 "language": language,
                 "waypoints_gt": [speed_wps_gt],
-                "route_gt": [route_gt],
                 "language_gt": language_gt,
                 "prompt": batch.driving_input.prompt.language_string,
                 "path": run_ids,
-                "qa_templates": batch.qa_templates,
-                "eval_infos": batch.driving_label.eval_infos,
+                "qa_templates": batch.qa_templates if batch.qa_templates is not None else [],
+                "eval_infos": batch.driving_label.eval_infos if batch.driving_label.eval_infos is not None else [],
             }
         else:
             self.prediction["waypoints"].append(speed_wps)
-            self.prediction["route"].append(route)
             self.prediction["language"].extend(language)
             self.prediction["waypoints_gt"].append(speed_wps_gt)
-            self.prediction["route_gt"].append(route_gt)
             self.prediction["language_gt"].extend(language_gt)
             self.prediction["prompt"].extend(batch.driving_input.prompt.language_string)
             self.prediction["path"].extend(run_ids)
-            self.prediction["qa_templates"].extend(batch.qa_templates)
-            self.prediction["eval_infos"].extend(batch.driving_label.eval_infos)
+            if batch.qa_templates is not None:
+                self.prediction["qa_templates"].extend(batch.qa_templates)
+            if batch.driving_label.eval_infos is not None:
+                self.prediction["eval_infos"].extend(batch.driving_label.eval_infos)
             
         
-        return speed_wps, route, language, speed_wps_gt, route_gt, language_gt
-
-    def equal_spacing_route(self, points):
-        route = np.concatenate((np.zeros_like(points[:1]),  points)) # Add 0 to front
-        shift = np.roll(route, 1, axis=0) # Shift by 1
-        shift[0] = shift[1] # Set wraparound value to 0
-
-        dists = np.linalg.norm(route-shift, axis=1)
-        dists = np.cumsum(dists)
-        dists += np.arange(0, len(dists))*1e-4 # Prevents dists not being strictly increasing
-
-        x = np.arange(0, 20, 1)
-        interp_points = np.array([np.interp(x, dists, route[:, 0]), np.interp(x, dists, route[:, 1])]).T
-
-        return interp_points
+        return speed_wps, language, speed_wps_gt, language_gt
 
     def on_predict_epoch_end(self) -> None:    
 
@@ -357,10 +330,12 @@ class DrivingModel(pl.LightningModule):
         samples_all = [i for i in range(len(self.prediction["prompt"]))]
         language = [(l, l_gt, p) for l, l_gt, p in zip(self.prediction["language"], self.prediction["language_gt"], self.prediction["path"])]
         
-        if len(samples_qa) > 0:
+        if len(samples_qa) > 0 and self.prediction.get("qa_templates"):
             # sort by templates
             sorted_samples = {} # question: {answer: [language, language_gt]}
             for qa_template, language_sample in zip(self.prediction["qa_templates"], language):
+                if qa_template is None:
+                    continue
                 question = qa_template[0]
                 answer = qa_template[1]
                 if question not in sorted_samples:
@@ -388,321 +363,20 @@ class DrivingModel(pl.LightningModule):
             with open(save_path_tmp, "w") as f:
                 json.dump(language_samples, f, indent=4)
             
-        route_preds = self.prediction["route"]
-        route_preds = torch.cat(route_preds, dim=0)
-        route_gt = self.prediction["route_gt"]
-        route_gt = torch.cat(route_gt, dim=0)
-        
         waypoints_preds = self.prediction["waypoints"]
         waypoints_preds = torch.cat(waypoints_preds, dim=0)
         waypoints_gt = self.prediction["waypoints_gt"]
         waypoints_gt = torch.cat(waypoints_gt, dim=0)
-        
-        # calc distance between wps for 1d wps
-        waypoints_preds_1d = []
-        for i in range(len(waypoints_preds)):
-            waypoint_pred = waypoints_preds[i]
-            waypoints_preds_1d_tmp = torch.tensor([torch.linalg.norm(waypoint_pred[i+1] - waypoint_pred[i]) for i in range(len(waypoint_pred)-1)])
-            # cumsum to get the distance from the start
-            waypoints_preds_1d_tmp = torch.cumsum(waypoints_preds_1d_tmp, dim=0)
-            waypoints_preds_1d_tmp = [[x, 0] for x in waypoints_preds_1d_tmp]
-            waypoints_preds_1d.append(waypoints_preds_1d_tmp)
-        waypoints_preds_1d = torch.tensor(waypoints_preds_1d)
-        
-        waypoints_gt_1d = []
-        for i in range(len(waypoints_gt)):
-            waypoint_gt = waypoints_gt[i]
-            waypoints_gt_1d_tmp = torch.tensor([torch.linalg.norm(waypoint_gt[i+1] - waypoint_gt[i]) for i in range(len(waypoint_gt)-1)])
-            # cumsum to get the distance from the start
-            waypoints_gt_1d_tmp = torch.cumsum(waypoints_gt_1d_tmp, dim=0)
-            waypoints_gt_1d_tmp = [[x, 0] for x in waypoints_gt_1d_tmp]
-            waypoints_gt_1d.append(waypoints_gt_1d_tmp)
-        waypoints_gt_1d = torch.tensor(waypoints_gt_1d)
-        
-        # calculate ade and fde for samples seperatly whihc have <SAFETY> in prompt and for <INSTRUCTION_FOLLOWING>
-        samples_safety = [i for i, l in enumerate(self.prediction["prompt"]) if "<SAFETY>" in l]
-        samples_instruction = [i for i, l in enumerate(self.prediction["prompt"]) if "<INSTRUCTION_FOLLOWING>" in l]
-        samples_neither = [i for i, l in enumerate(self.prediction["prompt"]) if "<SAFETY>" not in l and "<INSTRUCTION_FOLLOWING>" not in l]
-        samples_all = [i for i in range(len(self.prediction["prompt"]))]
-        
-        ade_fde = {}
-        
-        def get_desired_end_speed(wps):
-            wp_freq = 5
-            carla_fps = 20
-            # one WP every 0.25 seconds
-            # we want to get speed at the last WP
-            last_wp = wps[-1] #.cpu().numpy()
-            # we want the WP half second earlier than the last WP
-            one_second = int(carla_fps // (wp_freq))
-            half_second = one_second // 2
-            prev_wp = wps[-1 - half_second] #.cpu().numpy()
-            desired_speed = np.linalg.norm(prev_wp - last_wp) * 2.0
-            return desired_speed
-        def get_desired_speed(wps):
-            wp_freq = 5
-            carla_fps = 20
-            # one WP every 0.25 seconds
-            # we want to get speed at the last WP
-            # last_wp = wps[-1] #.cpu().numpy()
-            # we want the WP half second earlier than the last WP
-            one_second = int(carla_fps // (wp_freq))
-            half_second = one_second // 2
-            wp_half_second = wps[half_second] #.cpu().numpy()
-            wp_one_second = wps[one_second] #.cpu().numpy()
-            desired_speed = np.linalg.norm(wp_half_second - wp_one_second) * 2.0
-            return desired_speed
-        
-        def get_desired_avg_speed(wps):
-            wp_freq = 5
-            carla_fps = 20
-            # one WP every 0.25 seconds
-            # we want to get speed at the last WP
-            # last_wp = wps[-1] #.cpu().numpy()
-            # # we want the WP half second earlier than the last WP
-            # one_second = int(carla_fps // (wp_freq))
-            # half_second = one_second // 2
-            first_wp = wps[0] #.cpu().numpy()
-            last_wp = wps[-1] #.cpu().numpy()
-            desired_speed = np.linalg.norm(first_wp - last_wp) / (len(wps) * 0.25)
-            return desired_speed
-        
-        def get_1d_wps(wps):
-            waypoints_1d = [np.linalg.norm(wps[i+1] - wps[i]) for i in range(len(wps)-1)]
-            # cumsum to get the distance from the start
-            waypoints_1d = np.cumsum(waypoints_1d)
-            waypoints_1d = [[x, 0] for x in waypoints_1d]
-            
-            # prepend 0,0
-            waypoints_1d = [[0, 0]] + waypoints_1d
-            
-            return np.array(waypoints_1d).reshape(-1, 2)
-        
-            
-        wp_freq = 5
-        carla_fps = 20
-            
-        
-        for samples, name in zip([samples_safety, samples_instruction, samples_neither, samples_all], ["instruction"]):
-            if len(samples) == 0:
-                continue
-            route_preds_sample = route_preds[samples].cpu().numpy()
-            route_gt_sample = route_gt[samples].cpu().numpy()
-            waypoints_preds_sample = waypoints_preds[samples].cpu().numpy()
-            waypoints_gt_sample = waypoints_gt[samples].cpu().numpy()
-            eval_infos_sample = [self.prediction["eval_infos"][i] for i in samples]
-            waypoints_org_sample = [eval_infos_sample[i]["org_wps"] for i in range(len(samples))]
-            route_org_sample = [eval_infos_sample[i]["org_path"] for i in range(len(samples))]
-            waypoints_instruction_sample = [np.array(eval_infos_sample[i]["new_wps"]) for i in range(len(samples))]
-            route_instruction_sample = [eval_infos_sample[i]["new_path"] for i in range(len(samples))]
-            prompts = [self.prediction["prompt"][i].replace("<IMG_CONTEXT>", "") for i in samples]
-            pred_language = [self.prediction["language"][i] for i in samples]
-            paths = [self.prediction["path"][i] for i in samples]
-            
-            success_rate_all = []
-            success_rate_by_mode = {}
-            success_rate_by_allowed = {}
-            
-            paths_by_mode = {}
-            
-            for i in range(len(samples)):
-                mode = eval_infos_sample[i]["mode"]
-                allowed = eval_infos_sample[i]['allowed']
-                sample_path = paths[i]
-                
-                # Initialize mode in dictionary if not present
-                if mode not in success_rate_by_mode:
-                    success_rate_by_mode[mode] = []
-                if mode not in paths_by_mode:
-                    paths_by_mode[mode] = []
-                
-                # Initialize allowed in dictionary if not present
-                if allowed not in success_rate_by_allowed:
-                    success_rate_by_allowed[allowed] = []
-                
-                # get desired speed form WPs
-                desired_end_speed_pred = get_desired_end_speed(waypoints_preds_sample[i])
-                desired_end_speed_gt = get_desired_end_speed(waypoints_gt_sample[i])
-                desired_end_speed_org = get_desired_end_speed(waypoints_org_sample[i])
-                desired_end_speed_instruction = get_desired_end_speed(waypoints_instruction_sample[i])
-                
-                desired_speed_pred = get_desired_speed(waypoints_preds_sample[i])
-                desired_speed_gt = get_desired_speed(waypoints_gt_sample[i])
-                desired_speed_org = get_desired_speed(waypoints_org_sample[i])
-                desired_speed_instruction = get_desired_speed(waypoints_instruction_sample[i])
-                
-                desired_avg_speed_pred = get_desired_avg_speed(waypoints_preds_sample[i])
-                desired_avg_speed_gt = get_desired_avg_speed(waypoints_gt_sample[i])
-                desired_avg_speed_org = get_desired_avg_speed(waypoints_org_sample[i])
-                desired_avg_speed_instruction = get_desired_avg_speed(waypoints_instruction_sample[i])
-
-                
-                pred_wps_1d = get_1d_wps(waypoints_preds_sample[i])
-                pred_wps_1d_diffs = np.diff(pred_wps_1d[:, 0])
-                pred_speeds = pred_wps_1d_diffs / (wp_freq/carla_fps)
-                
-                org_wps_1d = get_1d_wps(waypoints_org_sample[i])
-                org_wps_1d_diffs = np.diff(org_wps_1d[:, 0])
-                org_speeds = org_wps_1d_diffs / (wp_freq/carla_fps)
-                
-                instruction_wps_1d = get_1d_wps(waypoints_instruction_sample[i])
-                instruction_wps_1d_diffs = np.diff(instruction_wps_1d[:, 0])
-                instruction_speeds = instruction_wps_1d_diffs / (wp_freq/carla_fps)
-                
-                x = np.arange(len(pred_speeds))*0.25
-                
-                # linear regression np
-                slope_pred, intercept_pred = np.polyfit(x, pred_speeds, 1)
-                slope_org, intercept_org = np.polyfit(x, org_speeds, 1)
-                slope_instruction, intercept_instruction = np.polyfit(x, instruction_speeds, 1)
-                
-                current_speed = float(prompts[i].split("Current speed: ")[-1].split(" ")[0])
-                
-                if mode == 'stop':
-                    # route doesnt matter
-                    paths_by_mode[mode].append(sample_path)
-                    if name == 'instruction' or name == 'neither':
-                        if np.min(pred_speeds) < 0.1:
-                            success_rate_all.append(1)
-                            success_rate_by_mode[mode].append(1)
-                            success_rate_by_allowed[allowed].append(1)
-                        else:
-                            success_rate_all.append(0)
-                            success_rate_by_mode[mode].append(0)
-                            success_rate_by_allowed[allowed].append(0)
-                            
-                elif mode == 'slower':
-                    paths_by_mode[mode].append(sample_path)
-
-                    if name == 'instruction' or name == 'neither':
-                        # forced instruction following
-                        if slope_pred < (-0.05 * current_speed):
-                            success_rate_all.append(1)
-                            success_rate_by_mode[mode].append(1)
-                            success_rate_by_allowed[allowed].append(1)
-                        else:
-                            success_rate_all.append(0)
-                            success_rate_by_mode[mode].append(0)
-                            success_rate_by_allowed[allowed].append(0)
-                        
-                elif mode == 'faster':
-                    paths_by_mode[mode].append(sample_path)
-                    
-                    if name == 'instruction' or name == 'neither':
-                        # forced instruction following
-                        if slope_pred > (0.05 * current_speed):
-                            success_rate_all.append(1)
-                            success_rate_by_mode[mode].append(1)
-                            success_rate_by_allowed[allowed].append(1)
-                        else:
-                            success_rate_all.append(0)
-                            success_rate_by_mode[mode].append(0)
-                            success_rate_by_allowed[allowed].append(0)
-                elif mode == 'target_speed':
-                    paths_by_mode[mode].append(sample_path)
-                    
-                    try:
-                        target_speed = float(prompts[i].split("Target waypoint: ")[-1].split("Command")[-1].split(".<|im_end|>")[0].split(" ")[-2])
-                    except:
-                        target_speed = float(prompts[i].split("Target waypoint: ")[-1].split("Command")[-1].split(".<|im_end|>")[0].split(" ")[-3])
-                    # ade from pred to instruction WP should be closer than to the GT WP
-                    # ade_pred_org = np.mean(np.linalg.norm(waypoints_preds_sample[i] - waypoints_org_sample[i], axis=-1))
-                    # ade_pred_instruction = np.mean(np.linalg.norm(waypoints_preds_sample[i] - waypoints_instruction_sample[i], axis=-1))
-                    if name == 'instruction' or name == 'neither':
-                        if ((desired_end_speed_pred > 0.8 * desired_end_speed_instruction and desired_end_speed_pred < 1.2 * desired_end_speed_instruction) or (desired_end_speed_pred > 0.8 * target_speed and desired_end_speed_pred < 1.2 * target_speed)):
-                            success_rate_all.append(1)
-                            success_rate_by_mode[mode].append(1)
-                            success_rate_by_allowed[allowed].append(1)
-                        else:
-                            success_rate_all.append(0)
-                            success_rate_by_mode[mode].append(0)
-                            success_rate_by_allowed[allowed].append(0)
-                    
-                elif mode == 'lane_change':
-                    paths_by_mode[mode].append(sample_path)
-                    
-                    # on path
-                    fde_pred_org = np.linalg.norm(route_preds_sample[i][-1] - route_org_sample[i][-1], axis=-1)
-                    fde_pred_instruction = np.linalg.norm(route_preds_sample[i][-1] - route_instruction_sample[i][-1], axis=-1)
-                    if name == 'instruction' or name == 'neither':
-                        if fde_pred_instruction < fde_pred_org:
-                            success_rate_all.append(1)
-                            success_rate_by_mode[mode].append(1)
-                            success_rate_by_allowed[allowed].append(1)
-                        else:
-                            success_rate_all.append(0)
-                            success_rate_by_mode[mode].append(0)
-                            success_rate_by_allowed[allowed].append(0)
-                elif mode == 'crash':
-                    paths_by_mode[mode].append(sample_path)
-                    
-                    ade_path_org_instruction = np.mean(np.linalg.norm(route_org_sample[i] - route_instruction_sample[i], axis=-1))
-                    ade_path_pred_org = np.mean(np.linalg.norm(route_preds_sample[i] - route_org_sample[i], axis=-1))
-                    ade_path_pred_instruction = np.mean(np.linalg.norm(route_preds_sample[i] - route_instruction_sample[i], axis=-1))
-                    if ade_path_org_instruction > 1.0:
-                        if name == 'instruction' or name == 'neither':
-                            if ade_path_pred_instruction < ade_path_pred_org:
-                                success_rate_all.append(1)
-                                success_rate_by_mode[mode].append(1)
-                                success_rate_by_allowed[allowed].append(1)
-                            else:
-                                success_rate_all.append(0)
-                                success_rate_by_mode[mode].append(0)
-                                success_rate_by_allowed[allowed].append(0)
-                    else:
-                        if name == 'instruction' or name == 'neither':
-                            if ade_path_pred_instruction < 1.0 and (np.mean(pred_speeds) < 1.3 * np.mean(instruction_speeds) or np.mean(pred_speeds) > 0.7 * np.mean(instruction_speeds)):
-                                success_rate_all.append(1)
-                                success_rate_by_mode[mode].append(1)
-                                success_rate_by_allowed[allowed].append(1)
-                            else:
-                                success_rate_all.append(0)
-                                success_rate_by_mode[mode].append(0)
-                                success_rate_by_allowed[allowed].append(0)
-
-                else:
-                    print(f"Unknown mode: {mode} in sample {i} with path {sample_path}")
-                                
-            # save result per sample
-            per_sample_results = {
-                'paths_by_mode': paths_by_mode,
-                'success_rate_by_mode': success_rate_by_mode
-            }
-            save_path_tmp = f"{str(save_prediction_path)}/results_per_sample_{name}_rank_{self.local_rank}.json"
-            if os.path.exists(save_path_tmp):
-                time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                save_path_tmp = f"{str(save_prediction_path)}/results_per_sample_{name}_rank_{self.local_rank}_{time}.json"
-            with open(save_path_tmp, "w") as f:
-                json.dump(per_sample_results, f, indent=4)
-            
-            if len(success_rate_all) > 0:
-                total_success_rate = sum(success_rate_all) / len(success_rate_all)
-                ade_fde.update({f"success_rate_total_{name}": total_success_rate})
-            else:
-                ade_fde.update({f"success_rate_total_{name}": 0})
-                
-            min_samples_per_mode = min([len(success_rate_by_mode[mode]) for mode in success_rate_by_mode])
-            balanced_total_success_rate = 0
-            # Calculate success rate for each mode
-            for mode in success_rate_by_mode:
-                if len(success_rate_by_mode[mode]) > 0:
-                    success_rate = sum(success_rate_by_mode[mode]) / len(success_rate_by_mode[mode])
-                    ade_fde.update({f"success_rate_{name}_{mode}": success_rate})
-                else:
-                    ade_fde.update({f"success_rate_{name}_{mode}": 0})
-                
-            ade_route = np.mean(np.linalg.norm(route_preds_sample - route_gt_sample, axis=-1), axis=-1)
-            
-            ade_fde.update({
-                f"num_samples_{name}": len(ade_route),
-            })
-
-        save_path_tmp = f"{str(save_prediction_path)}/dreamer_results_rank_{self.local_rank}.json"
+        err = torch.norm(waypoints_preds - waypoints_gt, dim=-1)
+        ade = err.mean().item()
+        fde = err[:, -1].mean().item()
+        metrics = {"ADE": ade, "FDE": fde}
+        save_path_tmp = f"{str(save_prediction_path)}/results_rank_{self.local_rank}.json"
         if os.path.exists(save_path_tmp):
             time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            save_path_tmp = f"{str(save_prediction_path)}/dreamer_results_rank_{self.local_rank}_{time}.json"
+            save_path_tmp = f"{str(save_prediction_path)}/results_rank_{self.local_rank}_{time}.json"
         with open(save_path_tmp, "w") as f:
-            json.dump(ade_fde, f, indent=4)
+            json.dump(metrics, f, indent=4)
         
 
     def log_training_output(self, training_output: TrainingOutput, mode: str, dataset: Optional[str] = None):

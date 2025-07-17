@@ -35,7 +35,6 @@ class DrivingModelConfig:
     betas: Tuple[float, float] = (0.9, 0.999)
     pct_start: float = 0.05
     speed_wps_mode: str = '2d'
-    predict_route_as_wps: bool = True
 
     _target_: str = "simlingo_training.models.driving.DrivingModel"
 
@@ -82,6 +81,14 @@ class DrivingDatasetConfig:
 class DreamerDatasetConfig:
     # base: DatasetBaseConfig = field(default_factory=DatasetBaseConfig)
     _target_: str = "simlingo_training.dataloader.dataset_dreamer.Data_Dreamer"
+
+@dataclass
+class CoVLADatasetConfig:
+    _target_: str = "simlingo_training.dataloader.dataset_covla.Data_CoVLA"
+
+@dataclass
+class NuScenesBehaviorDatasetConfig:
+    _target_: str = "simlingo_training.dataloader.dataset_nuscenes_behavior.Data_NuScenesBehavior"
     
 @dataclass
 class QADatasetConfig:
@@ -100,6 +107,8 @@ class DrivingDataModuleConfig:
     
     driving_dataset:Optional[ DrivingDatasetConfig] = field(default_factory=DrivingDatasetConfig)
     dreamer_dataset: Optional[DreamerDatasetConfig] = field(default_factory=DreamerDatasetConfig)
+    covla_dataset: Optional[CoVLADatasetConfig] = None
+    nuscenes_dataset: Optional[NuScenesBehaviorDatasetConfig] = None
     qa_dataset: Optional[QADatasetConfig] = field(default_factory=QADatasetConfig)
     insteval_dataset: Optional[InstEvalDatasetConfig] = field(default_factory=InstEvalDatasetConfig)
 
@@ -146,6 +155,7 @@ class TrainConfig:
     val_every_n_epochs: int = 1
 
     checkpoint: Optional[str] = None
+    visualize: bool = False
 
 
 def register_configs():

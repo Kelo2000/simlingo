@@ -6,34 +6,6 @@ from torch import Tensor, nn
 
 from simlingo_training.utils.custom_types import DrivingExample
 
-
-def cross_track_error(points: Tensor, path: Tensor):
-    """
-    Computes the cross track error between a set of points and a path.
-
-    Args:
-        points: The set of points to compute the cross track error for with shape [b, n, 2].
-        path: The path to compute the cross track error with with shape [b, m, 2]. The path
-            can contain nan values which indicates that the path is not available for that position.
-
-    Returns:
-        The cross track error for each point in the set of points with shape [b, n].
-    """
-
-    points, path = points.float(), path.float()
-
-    ind = torch.arange(path.size(0), device=path.device)[:, None]
-    closest = torch.cdist(points, path).nan_to_num_(torch.inf).argmin(-1)
-    pt0 = path[ind, (closest - 1).clamp_min(0)]
-    pt1 = path[ind, closest]
-    pt2 = path[ind, (closest + 1).clamp_max(path.size(1) - 1)]
-
-    tangent = (pt2 - pt1).nan_to_num_(0.0) + (pt1 - pt0).nan_to_num_(0.0)
-    normal = torch.stack((tangent[..., 1], -tangent[..., 0]), dim=-1)
-    normal = normal / normal.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-2)
-
-    return (points - pt1).mul(normal).sum(-1).abs()
-
 class NormZeroOne(nn.Module):
     def __init__(self, min_max: Tuple[float, float]):
         super().__init__()
@@ -94,30 +66,17 @@ class WaypointInputAdaptor(nn.Module):
 
 
 class DrivingAdaptor(nn.Module):
-    def __init__(self, 
-                hidden_size: int, 
-                mlp_dim=256, 
-                predict_route_as_wps=False, 
+    def __init__(self,
+                hidden_size: int,
+                mlp_dim=256,
                 speed_wps_mode=False,
             ):
         super().__init__()
+        self.speed_wps_mode = speed_wps_mode
+        self.queries = {}
+        self.sizes = {}
         self.heads = {}
         self.order = []
-
-        self.speed_wps_mode = speed_wps_mode
-        self.predict_route_as_wps = predict_route_as_wps
-
-        if predict_route_as_wps:
-            self.future_waypoints = 20
-            self.query_embeds_wps = nn.Parameter(0.02 * torch.randn((1, self.future_waypoints, hidden_size)))
-            self.route_head = nn.Sequential(
-                nn.Linear(hidden_size, mlp_dim*2), nn.SiLU(True),nn.Linear(mlp_dim*2, mlp_dim), nn.SiLU(True), nn.Linear(mlp_dim, 2, bias=False)
-            )
-            
-            self.queries = {'route': self.query_embeds_wps}
-            self.sizes = {'route': self.future_waypoints}
-            self.heads["route"] = self.route_head
-            self.order.append('route')
 
         if speed_wps_mode == '2d':
             dim = 2
@@ -186,13 +145,8 @@ class DrivingAdaptor(nn.Module):
         label = example.driving_label
         assert label is not None
         
-        if self.predict_route_as_wps:
-            label_route = label.path
-        else:
-            label_route = None
-
         if self.speed_wps_mode == '2d':
-            label_speed_wps = label.waypoints[:, : self.future_waypoints + 1]
+            label_speed_wps = label.waypoints[:, : self.future_speed_waypoints]
         elif self.speed_wps_mode == '1d':
             label_speed_wps = label.waypoints_1d
         else:
@@ -207,11 +161,6 @@ class DrivingAdaptor(nn.Module):
 
             prediction = self.heads[input_type](features_tmp).cumsum(1)
             loss = F.smooth_l1_loss(prediction, label, reduction="none").sum(-1)
-            
-            # if input_type == 'waypoints' and self.predict_route_as_wps:
-            #     # compute cross track error
-            #     cte = cross_track_error(prediction, label_waypoints)
-            #     loss_dict[f"{input_type}_cte_loss"] = (cte, torch.ones_like(cte, dtype=torch.long))
 
             loss_dict[f"{input_type}_loss"] = (loss, torch.ones_like(loss, dtype=torch.long))
             loss_dict[f"{input_type}_prediction"] = prediction

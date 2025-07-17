@@ -1,4 +1,4 @@
-from typing import Dict, List, NamedTuple, Optional, Tuple, TypedDict
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, TypedDict
 import torch
 from torch import Tensor
 
@@ -9,12 +9,13 @@ class DatasetOutput(NamedTuple):
     image_ff_org_size: Optional[Tensor]
     waypoints: Optional[List[Tuple[float, float]]]
     waypoints_1d: Optional[List[Tuple[float, float]]]
-    path: Optional[str]
-    target_points: Optional[List[Tuple[float, float]]]
+    target_points: Optional[Any]
     speed: Optional[float]
     placeholder_values: Optional[Dict]
     measurement_path: Optional[str]
     dataset: Optional[str]
+    camera_intrinsics: Optional[Tensor] = None
+    camera_extrinsics: Optional[Tensor] = None
     qa_templates: Optional[Tuple[str, str]] = None
     eval_infos: Optional[Dict] = None
 
@@ -52,7 +53,6 @@ class DrivingInput(NamedTuple):
 
 class DrivingLabel(NamedTuple):
     waypoints: Tensor  # [B, F, 2] 11 future waypoints 0.2s apart
-    path: Tensor 
     answer: LanguageLabel
     image_ff_org: Tensor
     eval_infos: Optional[Dict] = None
